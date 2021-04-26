@@ -12,6 +12,8 @@
  *******************************************************************************/
 package org.eclipse.jdt.ls.core.internal.handlers;
 
+import java.io.File;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -27,23 +29,29 @@ import org.apache.commons.lang3.StringUtils;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.URIUtil;
 import org.eclipse.jdt.core.ICompilationUnit;
 import org.eclipse.jdt.core.IJavaModelMarker;
 import org.eclipse.jdt.core.JavaCore;
 import org.eclipse.jdt.core.dom.CompilationUnit;
 import org.eclipse.jdt.core.formatter.DefaultCodeFormatterConstants;
 import org.eclipse.jdt.core.manipulation.CoreASTProvider;
+import org.eclipse.jdt.internal.compiler.impl.CompilerOptions;
+import org.eclipse.jdt.internal.compiler.problem.ProblemReporter;
 import org.eclipse.jdt.internal.ui.text.correction.IProblemLocationCore;
 import org.eclipse.jdt.internal.ui.text.correction.ProblemLocationCore;
 import org.eclipse.jdt.ls.core.internal.ChangeUtil;
+import org.eclipse.jdt.ls.core.internal.ExternalFileChange;
 import org.eclipse.jdt.ls.core.internal.JDTUtils;
 import org.eclipse.jdt.ls.core.internal.JavaCodeActionKind;
 import org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin;
+import org.eclipse.jdt.ls.core.internal.ResourceUtils;
 import org.eclipse.jdt.ls.core.internal.corrections.DiagnosticsHelper;
 import org.eclipse.jdt.ls.core.internal.corrections.InnovationContext;
 import org.eclipse.jdt.ls.core.internal.corrections.QuickFixProcessor;
 import org.eclipse.jdt.ls.core.internal.corrections.RefactorProcessor;
 import org.eclipse.jdt.ls.core.internal.corrections.proposals.ChangeCorrectionProposal;
+import org.eclipse.jdt.ls.core.internal.corrections.proposals.IProposalRelevance;
 import org.eclipse.jdt.ls.core.internal.preferences.PreferenceManager;
 import org.eclipse.jdt.ls.core.internal.preferences.Preferences;
 import org.eclipse.jdt.ls.core.internal.text.correction.AssignToVariableAssistCommandProposal;
@@ -52,6 +60,8 @@ import org.eclipse.jdt.ls.core.internal.text.correction.NonProjectFixProcessor;
 import org.eclipse.jdt.ls.core.internal.text.correction.QuickAssistProcessor;
 import org.eclipse.jdt.ls.core.internal.text.correction.RefactoringCorrectionCommandProposal;
 import org.eclipse.jdt.ls.core.internal.text.correction.SourceAssistProcessor;
+import org.eclipse.jface.text.Document;
+import org.eclipse.jface.text.IDocument;
 import org.eclipse.lsp4j.CodeAction;
 import org.eclipse.lsp4j.CodeActionContext;
 import org.eclipse.lsp4j.CodeActionKind;
@@ -61,6 +71,8 @@ import org.eclipse.lsp4j.Diagnostic;
 import org.eclipse.lsp4j.DiagnosticSeverity;
 import org.eclipse.lsp4j.WorkspaceEdit;
 import org.eclipse.lsp4j.jsonrpc.messages.Either;
+import org.eclipse.ltk.core.refactoring.Change;
+import org.eclipse.text.edits.InsertEdit;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -159,6 +171,8 @@ public class CodeActionHandler {
 			try {
 				codeActions.addAll(nonProjectFixProcessor.getCorrections(params, context, locations));
 				List<ChangeCorrectionProposal> quickfixProposals = this.quickFixProcessor.getCorrections(context, locations);
+				List<ChangeCorrectionProposal> ignoreCompilerProblemProposals = getIgnoreCompilerProblemProposals(diagnostics);
+				quickfixProposals.addAll(ignoreCompilerProblemProposals);
 				quickfixProposals.sort(comparator);
 				proposals.addAll(quickfixProposals);
 			} catch (CoreException e) {
@@ -193,6 +207,7 @@ public class CodeActionHandler {
 		if (monitor.isCanceled()) {
 			return Collections.emptyList();
 		}
+
 		try {
 			for (ChangeCorrectionProposal proposal : proposals) {
 				Optional<Either<Command, CodeAction>> codeActionFromProposal = getCodeActionFromProposal(proposal, params.getContext());
@@ -215,6 +230,49 @@ public class CodeActionHandler {
 
 		populateDataFields(codeActions);
 		return codeActions;
+	}
+
+	private List<ChangeCorrectionProposal> getIgnoreCompilerProblemProposals(List<Diagnostic> diagnostics) throws CoreException {
+		List<ChangeCorrectionProposal> result = new ArrayList<>();
+		String label = "Ignore this compiler problem";
+
+		URI settingsURI = JavaLanguageServerPlugin.getPreferencesManager().getPreferences().getSettingsAsURI();
+		if (settingsURI != null && URIUtil.isFileURI(settingsURI)) {
+			Map<String, List<Integer>> handledProblems = new HashMap<>();
+			File settingsFile = ResourceUtils.toFile(settingsURI);
+			String content = ResourceUtils.getContent(settingsURI);
+			IDocument doc = new Document(content);
+
+			for (Diagnostic diag : diagnostics) {
+				int problemId = getProblemId(diag);
+				int irritant = ProblemReporter.getIrritant(problemId);
+				if (irritant != 0) {
+					String compilerOption = CompilerOptions.optionKeyFromIrritant(irritant);
+					if (compilerOption != null) {
+						List<Integer> handledLines = handledProblems.getOrDefault(compilerOption, new ArrayList<>());
+						if (!handledLines.contains(diag.getRange().getStart().getLine())) {
+							String ignoreEntry = String.format("%s=%s\n", compilerOption, JavaCore.IGNORE);
+
+							Change change;
+							ExternalFileChange editChange = new ExternalFileChange(label, doc, settingsURI);
+							InsertEdit edit = new InsertEdit(0, ignoreEntry);
+							editChange.setEdit(edit);
+							if (settingsFile.exists()) {
+								change = editChange;
+								ChangeCorrectionProposal proposal = new ChangeCorrectionProposal(label, CodeActionKind.QuickFix, change, IProposalRelevance.ADD_SUPPRESSWARNINGS);
+								result.add(proposal);
+								if (JavaLanguageServerPlugin.getPreferencesManager().getPreferences().isJavaQuickFixShowAtLine()) {
+									handledLines.add(diag.getRange().getStart().getLine());
+									handledProblems.put(compilerOption, handledLines);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		return result;
 	}
 
 	private void populateDataFields(List<Either<Command, CodeAction>> codeActions) {
