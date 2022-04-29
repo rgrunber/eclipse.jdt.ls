@@ -52,6 +52,7 @@
       <plugin id="org.eclipse.jdt.launching"/>
       <plugin id="org.eclipse.jdt.launching.macosx"/>
       <plugin id="org.eclipse.jdt.ls.core"/>
+      <plugin id="org.eclipse.jdt.ls.logback.appender"/>
       <plugin id="org.eclipse.m2e.core"/>
       <plugin id="org.eclipse.m2e.jdt"/>
       <plugin id="org.eclipse.m2e.lifecyclemapping.defaults"/>
