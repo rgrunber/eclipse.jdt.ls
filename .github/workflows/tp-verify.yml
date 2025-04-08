@@ -1,0 +1,58 @@
+name: Target Platform Differences
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * *'
+
+jobs:
+  compute-differences:
+    runs-on: ubuntu-latest
+    outputs:
+        repo-cache-hit: ${{ steps.cache-jdtls-list.outputs.cache-hit }}
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+      - name: Cache .m2 repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml', '**/*.target') }}
+          save-always: true
+      - name: Cache Maven wrapper
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ hashFiles('**/mvnw') }}
+          save-always: true
+      - name: Set up Eclipse Temurin JDK
+        uses: actions/setup-java@v2
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - name: Build JDT-LS
+        run: |
+            ./mvnw -B -U clean verify -DskipTests
+            ls -1 org.eclipse.jdt.ls.product/target/repository/plugins/ | grep -v org.eclipse.jdt.ls | tee jdt-ls-runtime.list
+      - name: Check New Changes
+        id: cache-jdtls-list
+        uses: actions/cache@v4
+        with:
+            path: jdt-ls-runtime.list
+            key: jdt-ls-runtime.list-${{ hashFiles('jdt-ls-runtime.list') }}
+      - name: Upload JDT-LS Runtime List
+        uses: actions/upload-artifact@v4
+        with:
+          name: jdt-ls-runtime
+          path: |
+            jdt-ls-runtime.list
+          if-no-files-found: error
+  has-differences:
+    runs-on: ubuntu-latest
+    needs: compute-differences
+    if: ${{ needs.compute-differences.outputs.repo-cache-hit != 'true' }}
+    steps:
+       - name: Notify Target Platform Changed
+         run: |
+           echo "There was a change"
+
